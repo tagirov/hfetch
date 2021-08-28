@@ -36,7 +36,6 @@ yellow=$(echo -en '\033[00;33m')
 magenta=$(echo -en '\033[00;35m')
 grey=$(echo -en '\033[01;30m')
 white=$(echo -en '\033[0m')
-green=$(echo -en '\033[01;37m')
   
 cat << EOF
 
@@ -45,8 +44,8 @@ ${magenta}--------------user        $username
               ${magenta}wm          ${white}${wm}
      ${white}.${yellow}~${white}.      ${magenta}kernel      ${white}$kernel
      ${grey}/${yellow}V${grey}\      ${magenta}sensors     ${magenta}proc ${white}${cpu_temp} ${magenta}video ${white}${video_temp}
-    ${grey}/${green}/ \\${grey}\     ${magenta}packages    ${white}${pkgs}
-   ${grey}/${green}(   )${grey}\    ${magenta}shell       ${white}${SHELL##*/}
-    ${grey}^${green}\`${yellow}~${green}'${grey}^     ${magenta}ram         ${white}$ram_used ${magenta}of ${white}$ram ${magenta}MiB${white}
+    ${grey}/${white}/ \\${grey}\     ${magenta}packages    ${white}${pkgs}
+   ${grey}/${white}(   )${grey}\    ${magenta}shell       ${white}${SHELL##*/}
+    ${grey}^${white}\`${yellow}~${white}'${grey}^     ${magenta}ram         ${white}$ram_used ${magenta}of ${white}$ram ${magenta}MiB${white}
 ${magenta}--------------${magenta}uptime      ${white}$uptime_hours${magenta}hr${white}$uptime_minutes ${magenta}min
 EOF
