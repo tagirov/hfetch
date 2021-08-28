@@ -1,3 +1,8 @@
+<p align="center">
+    <img src="screenshot.png" alt="Image"/>
+</p>
+
+
 ### Depends
 
 lm_sensors
