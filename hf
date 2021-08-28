@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+yellow=$(echo -en '\033[00;33m')
+magenta=$(echo -en '\033[00;35m')
+grey=$(echo -en '\033[01;30m')
+white=$(echo -en '\033[0m')
+
 # clean environment, then make every file in the dir an argument,
 # then save the argument count to $pkgs
 set --
@@ -15,8 +20,18 @@ os=$(grep PRETTY_NAME < /etc/os-release | sed 's/\"//g' | sed 's/.*=//g')
 ram=$(echo $(("$(grep MemTotal < /proc/meminfo | awk '{print $2}')" / 1024)))
 ram_used=$(echo $(("$(grep MemAvailable < /proc/meminfo | awk '{print $2}')" / 1024)))
 ram_used=$(echo $((ram-ram_used)))
-uptime=$(uptime | awk '{print $3}' | sed 's/,//g' | sed 's/\:/ /g')
 username=$(whoami)
+
+IFS=. read -r s _ < /proc/uptime
+
+d=$((s / 60 / 60 / 24))
+h=$((s / 60 / 60 % 24))
+m=$((s / 60 % 60))
+
+# Only append days, hours and minutes if they're non-zero.
+case "$d" in ([!0]*) uptime="${uptime}${white}${d} ${magenta}day "; esac
+case "$h" in ([!0]*) uptime="${uptime}${white}${h} ${magenta}hr "; esac
+case "$m" in ([!0]*) uptime="${uptime}${white}${m} ${magenta}min "; esac
 
 kernel=$(cat /proc/sys/kernel/osrelease)
 kernel=${kernel%%-*}
@@ -29,13 +44,6 @@ done < "$HOME/.xinitrc"
 cpu_temp=$(sensors | awk '/CPU Temp/{gsub(/+/, "", $0); gsub(/.0/,"", $0); print $3}')
 video_temp=$(sensors | awk '/temp1/{gsub(/+/, "", $0); gsub(/.0/,"", $0); print $2}')
 
-uptime_hours="${uptime%??}"
-uptime_minutes="${uptime#?}"
-
-yellow=$(echo -en '\033[00;33m')
-magenta=$(echo -en '\033[00;35m')
-grey=$(echo -en '\033[01;30m')
-white=$(echo -en '\033[0m')
   
 cat << EOF
 
@@ -47,5 +55,5 @@ ${magenta}--------------user        $username
     ${grey}/${white}/ \\${grey}\     ${magenta}packages    ${white}${pkgs}
    ${grey}/${white}(   )${grey}\    ${magenta}shell       ${white}${SHELL##*/}
     ${grey}^${white}\`${yellow}~${white}'${grey}^     ${magenta}ram         ${white}$ram_used ${magenta}of ${white}$ram ${magenta}MiB${white}
-${magenta}--------------${magenta}uptime      ${white}$uptime_hours${magenta}hr${white}$uptime_minutes ${magenta}min
+${magenta}--------------${magenta}uptime      ${white}${uptime}
 EOF
