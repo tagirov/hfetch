@@ -11,12 +11,12 @@ for i in '/var/db/kiss/installed/*'  '/var/lib/pacman/local/[0-9a-z]*' \
 done
 pkgs=${###0}
 
-os=`cat /etc/os-release | grep PRETTY_NAME | sed 's/\"//g' | sed 's/.*=//g'`
-ram=$(echo "$((`cat /proc/meminfo | grep MemTotal | awk '{print $2}'`/1024))")
-ram_used=$(echo $((`cat /proc/meminfo | grep MemAvailable | awk '{print $2}'`/1024)))
+os=$(grep PRETTY_NAME < /etc/os-release | sed 's/\"//g' | sed 's/.*=//g')
+ram=$(echo $(("$(grep MemTotal < /proc/meminfo | awk '{print $2}')" / 1024)))
+ram_used=$(echo $(("$(grep MemAvailable < /proc/meminfo | awk '{print $2}')" / 1024)))
 ram_used=$(echo $((ram-ram_used)))
-uptime=`echo $(uptime | awk '{print $3}' | sed 's/,//g' | sed 's/\:/ /g')`
-username=`whoami`
+uptime=$(uptime | awk '{print $3}' | sed 's/,//g' | sed 's/\:/ /g')
+username=$(whoami)
 
 kernel=$(cat /proc/sys/kernel/osrelease)
 kernel=${kernel%%-*}
