@@ -34,7 +34,6 @@ case "$h" in ([!0]*) uptime="${uptime}${white}${h} ${magenta}hr "; esac
 case "$m" in ([!0]*) uptime="${uptime}${white}${m} ${magenta}min "; esac
 
 kernel=$(cat /proc/sys/kernel/osrelease)
-kernel=${kernel%%-*}
     
 # Get wm from xinitrc
 while read -r line; do
