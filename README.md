@@ -2,10 +2,16 @@
     <img src="screenshot.png" alt="Image"/>
 </p>
 
+Minimal system fetch written in pure POSIX sh (Linux only). No external dependencies — everything is read directly from `/proc` and `/sys`.
 
-### Depends
+Shows user, window manager, kernel, CPU/GPU temperatures, package count, shell, RAM usage and uptime. WM detection works on both X11 and Wayland; package counting supports pacman, dpkg, apk, xbps, rpm, portage, slackware, kiss, nix, guix and more.
 
-lm_sensors
+### Usage
+
+```sh
+./hfetch          # print system info
+./hfetch -v       # print version
+```
 
 ### Thanks
 
