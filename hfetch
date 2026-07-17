@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 # hfetch - minimal system fetch in pure POSIX sh (Linux only)
 
+version=0.2.0
+
 # byte-safe grep/sed/awk behavior regardless of the user's locale
 LC_ALL=C
 export LC_ALL
@@ -379,5 +381,12 @@ ${magenta}--------------user        $username
 ${magenta}--------------${magenta}uptime      ${white}${uptime}${white}
 EOF
 }
+
+case ${1:-} in
+-v | --version)
+    printf 'hfetch %s\n' "$version"
+    exit 0
+    ;;
+esac
 
 main
