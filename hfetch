@@ -1,58 +1,383 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
+# hfetch - minimal system fetch in pure POSIX sh (Linux only)
 
-yellow=$(echo -en '\033[00;33m')
-magenta=$(echo -en '\033[00;35m')
-grey=$(echo -en '\033[01;30m')
-white=$(echo -en '\033[0m')
+# byte-safe grep/sed/awk behavior regardless of the user's locale
+LC_ALL=C
+export LC_ALL
 
-# clean environment, then make every file in the dir an argument,
-# then save the argument count to $pkgs
-set --
-# kiss, arch, debian, void, gentoo
-for i in '/var/db/kiss/installed/*'  '/var/lib/pacman/local/[0-9a-z]*' \
-'/var/lib/dpkg/info/*.list'  '/var/db/xbps/.*'  '/var/db/pkg/*/*'; do
-	set -- $i
-	[ $# -gt 1 ] && break
-done
-pkgs=${###0}
+# ----------------------------------------------------------------- colors ---
 
-os=$(grep PRETTY_NAME < /etc/os-release | sed 's/\"//g' | sed 's/.*=//g')
-ram=$(echo $(("$(grep MemTotal < /proc/meminfo | awk '{print $2}')" / 1024)))
-ram_used=$(echo $(("$(grep MemAvailable < /proc/meminfo | awk '{print $2}')" / 1024)))
-ram_used=$(echo $((ram-ram_used)))
-username=$(whoami)
+yellow=$(printf '\033[00;33m')
+magenta=$(printf '\033[00;35m')
+grey=$(printf '\033[01;30m')
+white=$(printf '\033[0m')
 
-IFS=. read -r s _ < /proc/uptime
+# ---------------------------------------------------------------- helpers ---
 
-d=$((s / 60 / 60 / 24))
-h=$((s / 60 / 60 % 24))
-m=$((s / 60 % 60))
+# read_line <file>: print the first line of a readable file
+read_line() {
+    _line=''
+    [ -r "$1" ] || return 1
+    # the brace group silences "cannot open" if the file vanished after -r
+    { IFS= read -r _line <"$1"; } 2>/dev/null || [ -n "$_line" ] || return 1
+    printf '%s' "$_line"
+}
 
-# Only append days, hours and minutes if they're non-zero.
-case "$d" in ([!0]*) uptime="${uptime}${white}${d} ${magenta}day "; esac
-case "$h" in ([!0]*) uptime="${uptime}${white}${h} ${magenta}hr "; esac
-case "$m" in ([!0]*) uptime="${uptime}${white}${m} ${magenta}min "; esac
+# ------------------------------------------------------------------ system --
 
-kernel=$(cat /proc/sys/kernel/osrelease)
-    
-# Get wm from xinitrc
-while read -r line; do
-    [ "${line#exec }" = "$line" ] || wm="${line#exec }"
-done < "$HOME/.xinitrc"
+detect_system() {
+    # shellcheck source=/dev/null
+    os=$(. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-$NAME}")
+    [ -n "$os" ] || os=$(uname -s)
 
-cpu_temp=$(sensors | awk '/CPU Temp/{gsub(/+/, "", $0); gsub(/.0/,"", $0); print $3}')
-video_temp=$(sensors | awk '/temp1/{gsub(/+/, "", $0); gsub(/.0/,"", $0); print $2}')
+    kernel=$(uname -r)
+    # id -un fails for a passwd-less uid (containers with arbitrary uid)
+    username=${USER:-$(id -un 2>/dev/null)}
+    [ -n "$username" ] || username=$(id -u 2>/dev/null)
+    shell=${SHELL:-}
+    shell=${shell##*/}
+    [ -n "$shell" ] || shell=sh
+}
 
-  
-cat << EOF
+# ---------------------------------------------------------------- packages --
+
+count_packages() {
+    pkgs=0
+
+    # file-per-package databases: kiss, arch (pacman, dirs only - skips
+    # ALPM_DB_VERSION), old void (xbps), gentoo (portage), slackware,
+    # solus (eopkg)
+    for _glob in '/var/db/kiss/installed/*/' '/var/lib/pacman/local/*/' \
+        '/var/db/xbps/.*.plist' '/var/db/pkg/*/*/' '/var/log/packages/*' \
+        '/var/lib/eopkg/package/*/'; do
+        # shellcheck disable=SC2086
+        set -- $_glob
+        # an unmatched glob stays a literal pattern: check the match is real
+        [ -e "$1" ] && pkgs=$# && return 0
+    done
+
+    # everything else, native package managers before nix/guix overlays
+    if command -v nix-store >/dev/null 2>&1 && [ -d /run/current-system/sw ]; then
+        # NixOS: everything reachable from the system profile
+        pkgs=$(nix-store -q --requisites /run/current-system/sw 2>/dev/null |
+            wc -l)
+    elif [ -f /var/lib/dpkg/status ]; then
+        # debian/ubuntu: count installed packages by the last Status field
+        # ("Status: <want> <flag> installed") so held and reinstreq packages
+        # are included while removed-but-not-purged "rc" leftovers are not
+        pkgs=$(grep -c '^Status: .* installed$' /var/lib/dpkg/status \
+            2>/dev/null)
+    elif [ -f /lib/apk/db/installed ]; then
+        # alpine
+        pkgs=$(grep -c '^P:' /lib/apk/db/installed 2>/dev/null)
+    elif command -v xbps-query >/dev/null 2>&1; then
+        # modern void keeps a single pkgdb file, so query it instead
+        pkgs=$(xbps-query -l 2>/dev/null | wc -l)
+    elif command -v rpm >/dev/null 2>&1; then
+        # fedora, opensuse, ...
+        pkgs=$(rpm -qa 2>/dev/null | wc -l)
+    elif command -v guix >/dev/null 2>&1; then
+        # guix: system profile (Guix System), guix home and user profiles
+        for _p in /run/current-system/profile \
+            "${HOME:-}/.guix-home/profile" "${HOME:-}/.guix-profile"; do
+            [ -d "$_p" ] || continue
+            pkgs=$((pkgs + $(guix package -p "$_p" -I 2>/dev/null | wc -l)))
+        done
+    elif command -v nix-store >/dev/null 2>&1 && [ -d "${HOME:-}/.nix-profile" ]; then
+        # standalone nix, last so it never shadows the native manager
+        pkgs=$(nix-store -q --requisites "$HOME/.nix-profile" 2>/dev/null |
+            wc -l)
+    fi
+}
+
+# ------------------------------------------------------------------ ram -----
+
+read_ram() {
+    # shellcheck disable=SC2046
+    set -- $(awk '
+        /^MemTotal:/     { total = $2 }
+        /^MemAvailable:/ { avail = $2 }
+        /^MemFree:/      { free = $2 }
+        END { print total + 0, (avail ? avail : free) + 0 }
+    ' /proc/meminfo 2>/dev/null)
+    ram=$((${1:-0} / 1024))
+    ram_used=$(((${1:-0} - ${2:-0}) / 1024))
+}
+
+# ---------------------------------------------------------------- uptime ----
+
+read_uptime() {
+    _s=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    _d=$((_s / 60 / 60 / 24))
+    _h=$((_s / 60 / 60 % 24))
+    _m=$((_s / 60 % 60))
+
+    uptime=''
+    [ "$_d" -ne 0 ] && uptime="${uptime}${white}${_d} ${magenta}day "
+    [ "$_h" -ne 0 ] && uptime="${uptime}${white}${_h} ${magenta}hr "
+    [ "$_m" -ne 0 ] && uptime="${uptime}${white}${_m} ${magenta}min "
+    [ -n "$uptime" ] || uptime="${white}0 ${magenta}min "
+}
+
+# ---------------------------------------------------------------- de / wm ---
+
+# known compositors and window managers in priority order: DE shells first,
+# then standalone compositors and X11 WMs, nested/kiosk compositors last
+wm_list='gnome-shell|kwin_wayland|kwin_x11|kwin|cinnamon|muffin|marco|metacity'
+wm_list="$wm_list|xfwm4|budgie-wm|deepin-kwin|enlightenment|gala|cosmic-comp"
+wm_list="$wm_list|mutter|hyprland|sway|river|wayfire|niri|labwc|dwl|compiz"
+wm_list="$wm_list|i3|bspwm|dwm|awesome|openbox|fluxbox|blackbox|herbstluftwm"
+wm_list="$wm_list|qtile|spectrwm|icewm|jwm|pekwm|fvwm[23]?|wmaker|stumpwm"
+wm_list="$wm_list|ratpoison|2bwm|berry|xmonad.*|weston|cage|gamescope"
+
+detect_wm() {
+    wm=''
+
+    # 1. XDG_CURRENT_DESKTOP: a colon-separated list; skip vendor prefixes
+    #    ("ubuntu:GNOME" -> GNOME) but keep real DEs that list themselves
+    #    first ("Budgie:GNOME" -> Budgie)
+    _first='' _rest=${XDG_CURRENT_DESKTOP:-}
+    while [ -n "$_rest" ]; do
+        _part=${_rest%%:*}
+        if [ "$_part" = "$_rest" ]; then _rest=''; else _rest=${_rest#*:}; fi
+        [ -n "$_part" ] || continue
+        [ -n "$_first" ] || _first=$_part
+        case $_part in ubuntu | pop | zorin | nitrux) continue ;; esac
+        wm=$_part
+        break
+    done
+    [ -n "$wm" ] || wm=$_first
+    wm=${wm#X-} # "X-Cinnamon" -> "Cinnamon"
+    [ -z "$wm" ] || return 0
+
+    # 2. scan running processes, picking the match that comes first in
+    #    wm_list so a session compositor beats a nested one (gamescope,
+    #    cage). Dot-prefixed names are wrapper artifacts - ".foo-wrapped"
+    #    (nix) or ".foo-real" (guix) - truncated to 15 chars by the kernel,
+    #    so the suffix may be partial.
+    wm=$(cat /proc/[0-9]*/comm 2>/dev/null | awk -v list="$wm_list" '
+        BEGIN { n = split(list, pats, "|") }
+        {
+            name = $0
+            if (name ~ /^\./) {
+                sub(/^\./, "", name)
+                sub(/-(w(r(a(p(p(e(d)?)?)?)?)?)?|r(e(a(l)?)?)?)?$/, "", name)
+            }
+            if (!(name in seen)) { seen[name] = 1; names[++m] = name }
+        }
+        END {
+            for (i = 1; i <= n; i++)
+                for (j = 1; j <= m; j++)
+                    if (tolower(names[j]) ~ "^" pats[i] "$") {
+                        print names[j]
+                        exit
+                    }
+        }')
+    [ -z "$wm" ] || return 0
+
+    # 3. ask the X server (EWMH _NET_SUPPORTING_WM_CHECK)
+    if [ -n "${DISPLAY:-}" ] && command -v xprop >/dev/null 2>&1; then
+        _id=$(xprop -root -notype _NET_SUPPORTING_WM_CHECK 2>/dev/null)
+        _id=${_id##* }
+        case $_id in
+        0x*) wm=$(xprop -id "$_id" -notype -f _NET_WM_NAME 8t _NET_WM_NAME \
+            2>/dev/null | sed -n 's/.*= *"\(.*\)".*/\1/p') ;;
+        esac
+    fi
+    [ -z "$wm" ] || return 0
+
+    # 4. DESKTOP_SESSION, unless it is a generic session name that would
+    #    hide the real WM (debian's lightdm-xsession and friends)
+    _ds=${DESKTOP_SESSION:-}
+    _ds=${_ds##*/}
+    case $_ds in
+    '' | default | custom | xinitrc | startx* | *[Xx]session*) ;;
+    *) wm=$_ds ;;
+    esac
+    [ -z "$wm" ] || return 0
+
+    # 5. last resort: the command from the final exec line of ~/.xinitrc,
+    #    skipping wrappers, flags, env assignments and unresolvable $VARS
+    if [ -r "${HOME:-}/.xinitrc" ]; then
+        wm=$(awk '
+            { sub(/\r$/, "") }
+            /\\$/ { sub(/\\$/, ""); buf = buf $0 " "; next }
+            { $0 = buf $0; buf = "" }
+            /^[ \t]*exec[ \t]/ { line = $0 }
+            END {
+                if (!line) exit
+                n = split(line, a, /[ \t]+/)
+                for (i = 1; i <= n; i++) {
+                    w = a[i]
+                    # strip a trailing "&" and surrounding quotes so the
+                    # filters below see the bare word ("dwm&" -> "dwm")
+                    sub(/&+$/, "", w)
+                    gsub(/^["'\'']+|["'\'']+$/, "", w)
+                    if (w == "" || w == "exec" || w == "env" ||
+                        w == "setsid" || w == "nohup" ||
+                        w == "dbus-launch" || w == "dbus-run-session" ||
+                        w == "ssh-agent") continue
+                    if (w ~ /^[0-9]*[<>]/ || w ~ /^&>/) {
+                        # a bare redirection operator takes its target from
+                        # the next word - skip that too
+                        if (w ~ /[<>&|]$/) i++
+                        continue
+                    }
+                    if (w ~ /^-/ || w ~ /=/ || w ~ /^\$/) continue
+                    print w
+                    exit
+                }
+            }
+        ' "$HOME/.xinitrc")
+        wm=${wm##*/}
+    fi
+
+    [ -n "$wm" ] || wm=none
+}
+
+# ---------------------------------------------------------------- sensors ---
+# Temperatures are read straight from /sys - no lm_sensors dependency.
+
+# plausible_temp <millidegrees>: numeric, non-zero, within -40..150 C
+# (rejects dead sensors reporting 0, -273100 and similar garbage)
+plausible_temp() {
+    case $1 in
+    '' | - | *[!0-9-]* | ?*-*) return 1 ;;
+    esac
+    [ "$1" -ne 0 ] && [ "$1" -ge -40000 ] && [ "$1" -le 150000 ]
+}
+
+# hwmon_temp <dir> <cpu|gpu>: print millidegrees from the best sensor in a
+# hwmon directory; labeled die/package readings win over per-core or
+# auxiliary ones, Tdie wins over the offset Tctl on AMD Zen, and dead
+# sensors are skipped so a valid neighbor can win instead
+hwmon_temp() {
+    _best='' _best_rank=9
+    for _f in "$1"/temp*_input; do
+        [ -r "$_f" ] || continue
+        _val=$(read_line "$_f") || continue
+        plausible_temp "$_val" || continue
+        _label=$(read_line "${_f%_input}_label") || _label=''
+        case "$2:$_label" in
+        cpu:Tdie | cpu:Package\ id\ 0 | gpu:edge) _rank=1 ;;
+        cpu:Tctl | gpu:junction) _rank=2 ;;
+        cpu:CPU | gpu:GPU) _rank=3 ;;
+        *) _rank=8 ;;
+        esac
+        if [ "$_rank" -lt "$_best_rank" ]; then
+            _best=$_val _best_rank=$_rank
+            [ "$_rank" -eq 1 ] && break
+        fi
+    done
+    [ -n "$_best" ] && printf '%s' "$_best"
+}
+
+# hwmon_has_junction <dir>: true when the chip exposes a junction (hotspot)
+# sensor; discrete GPUs do while APU iGPUs export only edge, which makes
+# this a stable tie-breaker when several GPUs share the "amdgpu" name
+hwmon_has_junction() {
+    for _jl in "$1"/temp*_label; do
+        [ "$(read_line "$_jl")" = junction ] && return 0
+    done
+    return 1
+}
+
+# format_temp <millidegrees>: "57123" -> "57°C"; empty on garbage input
+format_temp() {
+    case $1 in
+    -*)
+        case ${1#-} in '' | *[!0-9]*) return 1 ;; esac
+        printf '%s°C' $((($1 - 500) / 1000))
+        ;;
+    '' | *[!0-9]*) return 1 ;;
+    *) printf '%s°C' $((($1 + 500) / 1000)) ;;
+    esac
+}
+
+read_sensors() {
+    _cpu_raw='' _gpu_raw='' _gpu_hot=0
+    for _hw in /sys/class/hwmon/hwmon*; do
+        _name=$(read_line "$_hw/name") || continue
+        case $_name in
+        coretemp | k10temp | k8temp | zenpower | bcm2835_thermal | \
+            *cpu*therm* | *soc*therm*)
+            if [ -z "$_cpu_raw" ]; then
+                _t=$(hwmon_temp "$_hw" cpu) && _cpu_raw=$_t
+            fi
+            ;;
+        amdgpu | radeon | nouveau | nvidia | i915 | xe | *gpu*therm*)
+            # prefer a chip with a junction sensor (discrete GPU) over one
+            # without (APU iGPU) when several GPUs share a driver name
+            if [ -z "$_gpu_raw" ] ||
+                { [ "$_gpu_hot" -eq 0 ] && hwmon_has_junction "$_hw"; }; then
+                if _t=$(hwmon_temp "$_hw" gpu); then
+                    _gpu_raw=$_t
+                    _gpu_hot=0
+                    hwmon_has_junction "$_hw" && _gpu_hot=1
+                fi
+            fi
+            ;;
+        esac
+    done
+
+    # CPU fallback: generic thermal zones (ARM SoCs, VMs, odd ACPI setups);
+    # CPU-ish zones are tried across the board before the ambiguous acpitz,
+    # and implausible readings (dead EC sensors) are skipped
+    if [ -z "$_cpu_raw" ]; then
+        for _pref in cpu acpi; do
+            for _tz in /sys/class/thermal/thermal_zone*; do
+                _type=$(read_line "$_tz/type") || continue
+                case "$_pref:$_type" in
+                cpu:x86_pkg_temp | cpu:*cpu* | cpu:*CPU* | cpu:soc* | \
+                    cpu:bcm* | acpi:acpitz) ;;
+                *) continue ;;
+                esac
+                _t=$(read_line "$_tz/temp") || continue
+                plausible_temp "$_t" || continue
+                _cpu_raw=$_t
+                break
+            done
+            [ -z "$_cpu_raw" ] || break
+        done
+    fi
+
+    # GPU fallback: proprietary nvidia exposes no hwmon on older drivers
+    if [ -z "$_gpu_raw" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        _t=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits \
+            2>/dev/null | head -n 1)
+        case $_t in '' | *[!0-9]*) ;; *) _gpu_raw=$((_t * 1000)) ;; esac
+    fi
+
+    cpu_temp=$(format_temp "$_cpu_raw") || cpu_temp=''
+    gpu_temp=$(format_temp "$_gpu_raw") || gpu_temp=''
+
+    sensors_line="${magenta}proc ${white}${cpu_temp:-n/a}"
+    [ -z "$gpu_temp" ] ||
+        sensors_line="$sensors_line ${magenta}video ${white}${gpu_temp}"
+}
+
+# ----------------------------------------------------------------- output ---
+
+main() {
+    detect_system
+    count_packages
+    read_ram
+    read_uptime
+    detect_wm
+    read_sensors
+
+    cat <<EOF
 
   ${white}$os
 ${magenta}--------------user        $username
               ${magenta}wm          ${white}${wm}
      ${white}.${yellow}~${white}.      ${magenta}kernel      ${white}$kernel
-     ${grey}/${yellow}V${grey}\      ${magenta}sensors     ${magenta}proc ${white}${cpu_temp} ${magenta}video ${white}${video_temp}
-    ${grey}/${white}/ \\${grey}\     ${magenta}packages    ${white}${pkgs}
-   ${grey}/${white}(   )${grey}\    ${magenta}shell       ${white}${SHELL##*/}
+     ${grey}/${yellow}V${grey}\\      ${magenta}sensors     ${sensors_line}
+    ${grey}/${white}/ \\${grey}\\     ${magenta}packages    ${white}${pkgs}
+   ${grey}/${white}(   )${grey}\\    ${magenta}shell       ${white}${shell}
     ${grey}^${white}\`${yellow}~${white}'${grey}^     ${magenta}ram         ${white}$ram_used ${magenta}of ${white}$ram ${magenta}MiB${white}
-${magenta}--------------${magenta}uptime      ${white}${uptime}
+${magenta}--------------${magenta}uptime      ${white}${uptime}${white}
 EOF
+}
+
+main
